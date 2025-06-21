@@ -28,12 +28,13 @@ type heightSample struct {
 }
 
 type shardInfo struct {
-	ShardId      int `json:"shardId"`
-	MaxHeight    int `json:"maxHeight"`
-	BlockDelay   int `json:"blockDelay"`
-	History      []heightSample
-	BlocksPerSec float64
-	PrevRate     float64
+	ShardId         int `json:"shardId"`
+	MaxHeight       int `json:"maxHeight"`
+	BlockDelay      int `json:"blockDelay"`
+	History         []heightSample
+	BlocksPerSec    float64
+	AvgBlocksPerSec float64
+	PrevRate        float64
 }
 
 type infoResponse struct {
@@ -117,6 +118,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						maxRate = sh.BlocksPerSec
 					}
 				}
+
+				// Calculate average block rate across history
+				var totalBlocks float64
+				var totalTime float64
+				for j := 1; j < len(sh.History); j++ {
+					dh := float64(sh.History[j].height - sh.History[j-1].height)
+					dt := sh.History[j].time.Sub(sh.History[j-1].time).Seconds()
+					if dt > 0 {
+						totalBlocks += dh
+						totalTime += dt
+					}
+				}
+				if totalTime > 0 {
+					sh.AvgBlocksPerSec = totalBlocks / totalTime
+				}
 			}
 			sh.PrevRate = prevRate
 			msg.shards[i] = *sh
@@ -144,12 +160,10 @@ func (m model) View() string {
 		syncBar := fmt.Sprintf("%s %s", syncBarColored(ratio), syncPct)
 		//syncBar := syncBarColored(ratio)
 
-		delayH := float64(shard.BlockDelay) / 3600.0
 		eta := "∞"
 		if shard.BlocksPerSec > 0 {
-			etaSec := int(float64(shard.BlockDelay) / shard.BlocksPerSec)
-
-			eta = formatETA(etaSec)
+			etaSec := int(float64(shard.BlockDelay) / shard.AvgBlocksPerSec)
+			eta = formatTime(etaSec)
 		}
 
 		rateRatio := shard.BlocksPerSec / math.Max(0.0001, m.maxRate)
@@ -164,11 +178,10 @@ func (m model) View() string {
 		arrow := trendArrow(shard.BlocksPerSec, shard.PrevRate)
 
 		out += fmt.Sprintf(
-			"Shard %d | Height: %-10s | Delay: %-10s (%.2f hrs) | ETA: %s\nSync status: %s\nBlocks/sec:  %s %.2f blk/s %s\n\n",
+			"Shard %d | Height: %-10s | Delay: %-10s | ETA: %s\nSync status: %s\nBlocks/sec:  %s %.2f blk/s %s\n\n",
 			shard.ShardId,
 			humanize.Comma(int64(shard.MaxHeight)),
 			humanize.Comma(int64(shard.BlockDelay)),
-			delayH,
 			eta,
 			syncBar,
 			meter,
@@ -227,7 +240,7 @@ func fetchData(apiURL string) tea.Msg {
 	return dataMsg{result.ShardInfos, time.Now()}
 }
 
-func formatETA(seconds int) string {
+func formatTime(seconds int) string {
 	d := time.Duration(seconds) * time.Second
 	if d.Hours() >= 24 {
 		days := int(d.Hours()) / 24
