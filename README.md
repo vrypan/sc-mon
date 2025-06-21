@@ -1,6 +1,8 @@
 # sc-mon
 Snapchain node monitor
 
+![screenshot](screenshot.png)
+
 ## Install
 
 - Binaries: [pre-built binaries](https://github.com/vrypan/sc-mon/releases)
