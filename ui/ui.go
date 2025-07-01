@@ -16,10 +16,8 @@ import (
 )
 
 const (
-	refreshInt   = 2 * time.Second
-	barWidth     = 100
-	historyLen   = 100
-	rateBarWidth = barWidth
+	refreshInt = 2 * time.Second
+	historyLen = 100
 )
 
 type heightSample struct {
@@ -42,10 +40,12 @@ type infoResponse struct {
 }
 
 type model struct {
-	shards  []shardInfo
-	err     error
-	apiURL  string
-	maxRate float64
+	shards       []shardInfo
+	err          error
+	apiURL       string
+	maxRate      float64
+	barWidth     int
+	rateBarWidth int
 }
 
 type errMsg struct{ error }
@@ -64,17 +64,25 @@ var (
 
 func Run(apiURL string) {
 	p := tea.NewProgram(NewModel(apiURL))
-	if err := p.Start(); err != nil {
+	if _, err := p.Run(); err != nil {
 		fmt.Println("Error starting app:", err)
 		os.Exit(1)
 	}
 }
 
 func NewModel(apiURL string) model {
-	return model{apiURL: apiURL}
+	return model{
+		apiURL:       apiURL,
+		barWidth:     100,
+		rateBarWidth: 100,
+	}
 }
 
 func (m model) Init() tea.Cmd {
+	return m.doTick()
+}
+
+func (m model) doTick() tea.Cmd {
 	return tea.Tick(refreshInt, func(t time.Time) tea.Msg {
 		return fetchData(m.apiURL)
 	})
@@ -87,21 +95,34 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "q", "esc", "ctrl+c":
 			return m, tea.Quit
 		}
+	case tea.WindowSizeMsg:
+		m.barWidth = msg.Width - 30 // adjust padding as needed
+		if m.barWidth < 10 {
+			m.barWidth = 10
+		}
+
+		m.rateBarWidth = msg.Width - 30 // adjust padding as needed
+		if m.rateBarWidth < 10 {
+			m.rateBarWidth = 10
+		}
+		return m, nil
 	case errMsg:
 		m.err = msg
-		return m, m.Init()
+		return m, m.doTick()
 	case dataMsg:
 		maxRate := 0.0
+		shardPrevMap := make(map[int]shardInfo, len(m.shards))
+		for _, prev := range m.shards {
+			shardPrevMap[prev.ShardId] = prev
+		}
 		for i := range msg.shards {
 			sh := &msg.shards[i]
-			prevHist := []heightSample{}
-			prevRate := 0.0
-			for _, prev := range m.shards {
-				if prev.ShardId == sh.ShardId {
-					prevHist = prev.History
-					prevRate = prev.BlocksPerSec
-					break
-				}
+			prev, ok := shardPrevMap[sh.ShardId]
+			var prevHist []heightSample
+			var prevRate float64
+			if ok {
+				prevHist = prev.History
+				prevRate = prev.BlocksPerSec
 			}
 			sh.History = append(prevHist, heightSample{height: sh.MaxHeight, time: msg.time})
 			if len(sh.History) > historyLen {
@@ -120,8 +141,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 
 				// Calculate average block rate across history
-				var totalBlocks float64
-				var totalTime float64
+				var totalBlocks, totalTime float64
 				for j := 1; j < len(sh.History); j++ {
 					dh := float64(sh.History[j].height - sh.History[j-1].height)
 					dt := sh.History[j].time.Sub(sh.History[j-1].time).Seconds()
@@ -139,26 +159,26 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.shards = msg.shards
 		m.maxRate = maxRate
-		return m, m.Init()
+		return m, m.doTick()
 	}
 	return m, nil
 }
 
 func (m model) View() string {
 	if m.err != nil {
-		return fmt.Sprintf("Error: %v", m.err)
+		errMsg := fmt.Sprintf("Error: %v", m.err)
+		return wrapText(errMsg, 80)
 	}
 
-	var out string
-	out += titleStyle.Render("Snapchain Node Monitor") + " "
-	out += fmt.Sprintf("%s\n\n", time.Now().Format(time.RFC1123))
+	var sb strings.Builder
+	sb.WriteString(titleStyle.Render("Snapchain Node Monitor") + " ")
+	sb.WriteString(fmt.Sprintf("%s\n\n", time.Now().Format(time.RFC1123)))
 
 	for _, shard := range m.shards {
 		total := float64(shard.MaxHeight + shard.BlockDelay)
 		ratio := float64(shard.MaxHeight) / math.Max(1, total)
 		syncPct := fmt.Sprintf("%.1f%%", ratio*100)
-		syncBar := fmt.Sprintf("%s %s", syncBarColored(ratio), syncPct)
-		//syncBar := syncBarColored(ratio)
+		syncBar := fmt.Sprintf("%s %s", m.syncBarColored(ratio), syncPct)
 
 		eta := "∞"
 		if shard.BlocksPerSec > 0 {
@@ -166,18 +186,18 @@ func (m model) View() string {
 			eta = formatTime(etaSec)
 		}
 
-		rateRatio := shard.BlocksPerSec / math.Max(0.0001, m.maxRate)
-		if rateRatio > 1.0 {
-			rateRatio = 1.0
-		}
-		meterFilled := int(rateRatio * float64(rateBarWidth))
+		maxRate := math.Max(0.0001, m.maxRate)
+		rateRatio := shard.BlocksPerSec / maxRate
+		rateRatio = math.Min(rateRatio, 1.0)
+		meterFilled := int(rateRatio * float64(m.rateBarWidth))
 		meter := fmt.Sprintf("[%s%s]",
 			meterStyleLight.Render(strings.Repeat("■", meterFilled)),
-			meterStyleLight.Render(strings.Repeat(" ", rateBarWidth-meterFilled)))
+			meterStyleLight.Render(strings.Repeat(" ", m.rateBarWidth-meterFilled)),
+		)
 
 		arrow := trendArrow(shard.BlocksPerSec, shard.PrevRate)
 
-		out += fmt.Sprintf(
+		sb.WriteString(fmt.Sprintf(
 			"Shard %d | Height: %-10s | Delay: %-10s | ETA: %s\nSync status: %s\nBlocks/sec:  %s %.2f blk/s %s\n\n",
 			shard.ShardId,
 			humanize.Comma(int64(shard.MaxHeight)),
@@ -187,16 +207,16 @@ func (m model) View() string {
 			meter,
 			shard.BlocksPerSec,
 			arrow,
-		)
+		))
 	}
 
-	out += "(Press 'q' or ESC to quit)"
-	return out
+	sb.WriteString("(Press 'q' or ESC to quit)")
+	return sb.String()
 }
 
-func syncBarColored(ratio float64) string {
-	filled := int(ratio * float64(barWidth))
-	empty := barWidth - filled
+func (m model) syncBarColored(ratio float64) string {
+	filled := int(ratio * float64(m.barWidth))
+	empty := m.barWidth - filled
 
 	style := redStyle
 	if ratio > 0.7 {
@@ -211,12 +231,14 @@ func syncBarColored(ratio float64) string {
 }
 
 func trendArrow(current, prev float64) string {
-	if current > prev {
+	switch {
+	case current > prev:
 		return "↗"
-	} else if current < prev {
+	case current < prev:
 		return "↘"
+	default:
+		return "→"
 	}
-	return "→"
 }
 
 func fetchData(apiURL string) tea.Msg {
@@ -234,7 +256,7 @@ func fetchData(apiURL string) tea.Msg {
 	var result infoResponse
 	err = json.Unmarshal(body, &result)
 	if err != nil {
-		return errMsg{err}
+		return errMsg{fmt.Errorf("json=%s, err=%v", body, err)}
 	}
 
 	return dataMsg{result.ShardInfos, time.Now()}
@@ -253,4 +275,20 @@ func formatTime(seconds int) string {
 	} else {
 		return fmt.Sprintf("%dm", int(d.Minutes()))
 	}
+}
+
+func wrapText(s string, width int) string {
+	if width <= 0 {
+		return s
+	}
+
+	var result string
+	for i := 0; i < len(s); i += width {
+		end := i + width
+		if end > len(s) {
+			end = len(s)
+		}
+		result += s[i:end] + "\n"
+	}
+	return result
 }
