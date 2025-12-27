@@ -9,7 +9,7 @@ Snapchain node monitor
 - From source: Clone the repo, and run `make`. Copy the generated binaries `sc-mon` to a location in your $PATH.
 - macOS/Homebrew:
   ```
-  brew install vrypan/sc-mon/sc-mon
+  brew install vrypan/tap/sc-mon
   ```
 
 ## Use
